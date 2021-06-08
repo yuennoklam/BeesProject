@@ -1,0 +1,359 @@
+---
+title: "Data manipulation for analysis of wild bee functional traits"
+author: "Alexa Varah"
+date: "20/05/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This takes the raw data from Alexa Varah's PhD and creates the data frame to be used for analysis. Data was collected in 2011-2013 at 6 agroforestry farms in the UK. It's an observational study using a paired sample design, with an agroforestry field and a control (monoculture) field on each farm. The data was collected using both transects and pan traps.  
+  
+Run with `r getRversion()`.
+
+## Load packages  
+
+```{r Load-packages, message=FALSE, warning=FALSE}
+rm(list=ls())
+
+pkgs <- c("readxl", # # for reading in Excel workbooks / spreadsheets
+          "tidyverse", # for data manipulation (includes packages dplyr, tidyr, stringr, ggplot2, purr, tibble, readr, forcats)
+          "chron", # for dealing with dates/times
+          "plyr", # for creating bee trait table with match_df
+          "dplyr", # for modifying dataframe columns
+          "FD", # for calculating gower distance
+          "gawdis", #for calculating weighted gower distance
+          "lubridate" #for handling dates
+          ) 
+
+vapply(pkgs, library, logical(1), character.only = TRUE, logical.return = TRUE,
+       quietly = TRUE)
+```
+# Make dataframes ready for analysis
+
+## Bumblebee transect data
+
+```{r load-data}
+transectdata <- read_xlsx("RawData/Transect\ data_master_2021-05-04.xlsx",2)
+```
+
+For the bumblebee analysis, exclude WAF 2011 as the monoculture field was a sown clover ley but the agroforestry field was a sown ley with little clover. Bumblebees use clover as a food source.  
+```{r prep-data}
+rm(bb_transect_data)
+bb_transect_data <- subset(transectdata) %>%# extract just the columns relevant to bumblebee analyses
+  select(site:campestris)%>%
+  mutate(
+    site = recode(site, "seh" = "waf"),
+    visit = factor(visit),
+    year = factor(year),
+    monthtxt = month.abb[month],
+    yrmth = paste(year, month, sep="-"), # create a new vector of month-year
+    landuse = factor(landuse),
+    treatment = factor(treatment),
+    field = factor(field),
+    bound.area = as.numeric(bound.area),
+    snh = as.numeric(snh),
+    # remove dates from transect start and end times 
+    #(they were the wrong dates anyway):
+    starttime = chron::times(strftime(start,"%H:%M:%S")), 
+    endtime = chron::times(strftime(end,"%H:%M:%S")), 
+    # get rid of the one value of 4 in windstrength:
+    windfac = factor(wind),
+    wind3 = factor(1+(windfac=="2")+2*(windfac=="3")+2*(windfac=="4")),
+    date = as.Date(paste(day, month, year, sep="-"), "%d-%m-%Y"),# concatenate day, month, year to create date
+    # Now calculate days since 1st March. 
+    # The code below is two lines of code condensed:
+    #B$Mar1 = as.Date(paste(01, 03, B$year, sep="-"), "%d-%m-%Y") ,
+    #B$jdate = difftime(B$date ,B$Mar1 , units = c("days")),
+    jdate = difftime(date, as.Date(paste(01, 03, year, sep="-"),"%d-%m-%Y"), units = c("days"))
+    ) %>% 
+  mutate(site= factor(site)) %>%
+  # Filter out WAF 2011 because of management differences (different sown leys), 
+  # and remove the August visit to WAF in 2012 because bumblebees 
+  # weren't sampled on that visit:
+  filter(!(year == '2011' & site == 'waf') & 
+           !(year == '2012' & site == 'waf' & month == 8) ) %>% 
+  # remove columns we don't need:
+  # (start and end times in date-time format, butterfly activity, HYMENOPTERA, extraneous bee columns )
+  select(-c("butact","unidbomb","HYMENOPTERA","Apidae","Bombus","ter.luc.worker","terrestris",
+            "lucorum","start","end"))   %>%
+  # move the new columns to before the species counts
+  relocate(monthtxt:jdate, .before = Bombus.terr.luc) %>% 
+  # get rid of any unused levels, i.e. SEH:
+  droplevels() %>% 
+  # rename Bombus.terr.luc to just terr.luc
+  rename(.,replace = c("Bombus.terr.luc" = "terr.luc")) %>% 
+  data.frame() # %>% 
+
+#rm(transectdata)
+```
+Ignore the warning message about NAs: site WAF in 2011 had no values for *snh* and so when *snh* is converted to numeric these NAs cause R to throw a warning. As we've removed all WAF-2011 data the issue is removed.  
+  
+Save the output.
+```{r}
+write.csv(bb_transect_data, 'output/BombusTransectData.csv', row.names=FALSE)
+```
+
+
+Summarise species counts at each site and treatment. I show you how to do it in two different ways:
+```{r Make-species-counts-df, warning=FALSE, message=FALSE}
+B <- subset(bb_transect_data, 
+       # extract columns we want:
+       select=c(site, treatment, terr.luc:campestris)) %>% 
+  # sum butterfly species at each site-visit-treatment combo: 
+  # (in other words, get total species counts per transect) 
+  # If you don't want the ID column, you could
+  # use 'unite' rather than 'paste' to make the ID on which to group because 
+  # 'unite' immediately removes the site, visit and year columns
+  dplyr::mutate(id = paste(site, treatment, sep="-")) %>% 
+  id <- as.factor(id)%>%
+  #unite(svt, c(site, visit, treatment), sep = "", remove = FALSE) %>%
+  group_by(id) %>%
+  dplyr::summarise(across(terr.luc:campestris,.fns = sum)) %>% 
+  #select(-svt) %>%  # remove the grouping column
+  as.data.frame()
+
+head(B)
+```
+or;
+Make bb_transect_data tidy for analysis in a new B dataframe
+```{r}
+B <- bb_transect_data %>% 
+  #select(-c(visit:landuse, field:wind3)) %>% 
+  mutate_at(31:43, funs(as.numeric))%>%
+  # remove unnecessary columns:
+  select(-c(tran.dist, visit))%>%
+  # create grouping factor that excludes time:
+  dplyr::group_by(across(c(1,5:20,25:26)))%>% 
+  # get total species counts per year at each site and treatment:
+  # (this works because only the species columns are numeric)
+  dplyr::summarise(across(terr.luc:campestris, sum)) %>%
+  gather(., species, abundance, terr.luc:campestris, factor_key=TRUE)%>%
+  #add a full name to match traitlist later
+  mutate(Bombus="Bombus")%>%
+  unite("fullname", Bombus, species, sep=" ", remove=FALSE)%>%
+  select((-c(Bombus)))%>%
+  #since barbutellus and bohemicus have 0 in all observations, delete it from data
+  #aggregate(B$abundance, by=list(Category=B$fullname), FUN=sum)
+  filter(species != c("barbutellus", "bohemicus"))%>%
+  ungroup
+```
+
+To sum all observations:
+```{r}
+colSums( as.data.frame (colSums(B[,-1])) )
+```
+This number is smaller than the number in my 2020 AEE paper as that was just abundance (species identity wasn't important) so I could include unidentified species.  
+
+
+Make a species trait matrix
+```{r}
+#read trait list
+traitlist = read_xlsx("RawData/Traits_VarahUK_20201127.xlsx",1, skip = 1, col_names = TRUE)
+names(traitlist)[c(1,2,9,10,14)] <- c("fullname", "ITD", "Sociality", "Nesting_construction", "Lecty")
+
+#make species trait matrix
+Btrait <- traitlist%>%
+  select(-c(3:8,11:13,15:26))%>%
+  `colnames<-`(c("fullname", "ITD", "Sociality", "Nesting_construction", "Lecty", "Jan","Feb","Mar","Apr","May", "Jun", 
+                 "Jul","Aug", "Sep", "Oct","Nov", "Dec")) %>%
+  match_df(B, on="fullname")%>%
+  add_row(traitlist[traitlist$fullname=="Bombus terrestris",c(1,2,9,10,14,27:38)])%>%
+  add_row(traitlist[traitlist$fullname=="Bombus lucorum",c(1,2,9,10,14,27:38)])%>%
+  #Integrate Bombus terrestris and lucorum (ITD average is calculated; mean flight duration (10) is used)
+  rbind(c("Bombus.terr.luc", "5.395", "Primitively eusocial","Renter: Existing cavities", "Polylectic s.s.",
+            "1","1","1","1","1","1","1","1","1","1",NA,NA))%>%
+  mutate_at(6:17, funs(as.numeric))%>%
+  rowwise()%>%
+  dplyr::mutate(ActiveMonth = sum(c_across(Jan:Dec), na.rm=TRUE))
+  
+```
+
+Make the Btraits data into defined cetegories for analysis (beetraits)
+```{r}
+BBTtraits <- Btrait %>%
+  mutate(Sociality = recode(Sociality, "Social parasite" = "Not obligately solitary", 
+                            "Primitively eusocial" = "Not obligately solitary"),
+         Lecty = recode(Lecty, "Broadly polylectic" = "Polylectic/flexible", 
+                        "Polylectic s.s." = "Polylectic/flexible"),
+         Nesting_construction = recode(Nesting_construction, "Social parasite" = "non-excavators", 
+                                       "Renter: Existing cavities" = "non-excavators",
+                                       "Carder" = "non-excavators"),
+         Nesting_location = c(rep("above-ground", 13)),
+         ITD = as.numeric(ITD),
+         #standardise continuous traits for Gower distance calculation
+         scITD = apply(as.matrix(ITD), MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X))),
+         scAM = apply(as.matrix(ActiveMonth), MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X))))  %>%
+  mutate_at(c(3:5,19), funs(as.factor)) %>%
+  relocate(ActiveMonth:scAM, .before = Jan)
+  
+
+#check if data are normally distributed
+#activemonth is roughly normal
+#ITD is slightly right skewed
+hist(BBTtraits$scAM)
+hist(BBTtraits$scITD)
+```
+
+We only have 11 species and some traits are the same for all species. Those traits shouldn't be included in the calculation of Gower distance. In this case, we will also read the pan trap data of bumblebees and solitary bees. 
+
+```{r}
+#read data
+rawsbpan <- read_xlsx("RawData/pan\ traps_solitary\ bees_2021-05-04.xlsx")
+
+sbpan <- subset(rawsbpan) %>% 
+  dplyr::rename(fullname = sp, note = ...13)%>%
+  select(uniqueID:note)%>%
+  mutate(
+    Site = factor(Site),
+    Treatment = factor(Treatment),
+    fullname = factor(fullname),
+    Date = as.Date(Date), 
+    `Pan colour` = recode(`Pan colour`, "y" = "Y")%>%`Pan colour` = factor(`Pan colour`),
+    Sex = factor(Sex)) %>%
+  # Filter out WAF 2011 because of management differences (different sown leys), 
+  # and remove the August visit to WAF in 2012 because bumblebees weren't sampled on that visit:
+  filter(!(year(Date) == '2011' & Site == 'WAF') & 
+           !(year(Date) == '2012' & Site == 'WAF' & month(Date) == 8) & 
+           !(Species=="?") & 
+           !(Site == "SD" & Treatment =="AF" & Date == "2012-07-17")) %>%
+  droplevels() %>%
+  data.frame() 
+
+#group variables and excluded time, pan trap colour and sample station
+#data cleaned for analysis
+sbpan2 <- subset(sbpan) %>%
+  group_by(Site, Treatment, fullname, Pan.colour, Sample.station,.drop=FALSE)%>%
+  tally()
+  
+#make species trait matrix
+SBtrait <- traitlist%>%
+  select(-c(3:8,11:13,15:26))%>%
+  `colnames<-`(c("fullname", "ITD", "Sociality", "Nesting_construction", "Lecty", "Jan","Feb","Mar","Apr","May", "Jun", 
+                 "Jul","Aug", "Sep", "Oct","Nov", "Dec")) %>%
+  match_df(sbpan2, on="fullname")%>%
+  mutate_at(6:17, funs(as.numeric))%>%
+  rowwise()%>%
+  dplyr::mutate(ActiveMonth = sum(c_across(Jan:Dec), na.rm=TRUE))
+
+#Make the SBtraits data into defined cetegories for analysis (beetraits)
+asbtraits <- SBtrait %>%
+  mutate(Sociality = recode(Sociality, "Social parasite" = "Not obligately solitary", 
+                            "Primitively eusocial" = "Not obligately solitary",
+                            "Solitary + Primitively eusocial" = "Not obligately solitary",
+                            "Polymorphic" = "Not obligately solitary",
+                            "Cleptoparasite" = "Obligately solitary",
+                            "Solitary" = "Obligately solitary"),
+         Lecty = recode(Lecty, "Broadly polylectic" = "Polylectic/flexible", 
+                        "Polylectic s.s." = "Polylectic/flexible",
+                        "Polylectic" = "Polylectic/flexible",
+                        "Mesolectic" = "Polylectic/flexible",
+                        "Monolectic" = "Obligately oligolectic",
+                        "Oligolectic" = "Obligately oligolectic",
+                        "Narrowly oligolectic" = "Obligately oligolectic"),
+         Nesting_location = Nesting_construction %>% 
+                            recode("Excavator: Ground" = "below-ground",
+                                   "Renter: Existing cavities and Excavator, ground" = "excavators",
+                                   .default = "above-ground"),
+         Nesting_construction = recode(Nesting_construction, "Social parasite" = "non-excavators", 
+                                       "Renter: Existing cavities" = "non-excavators",
+                                       "Carder" = "non-excavators",
+                                       "Cleptoparasite" = "non-excavators",
+                                       "Renter: Snail shells" = "non-excavators",
+                                       "Excavator: Ground" = "excavators",
+                                       "Excavator: Dead wood" = "excavators",
+                                       "Renter: Existing cavities and Excavator, ground" = "excavators"),
+         ITD = as.numeric(ITD),
+         #standardise continuous traits for Gower distance calculation
+         scITD = apply(as.matrix(ITD), MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X))),
+         scAM = apply(as.matrix(ActiveMonth), MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X))))  %>%
+  mutate_at(c(3:5,19), funs(as.factor)) %>%
+  relocate(ActiveMonth:scAM, .before = Jan) %>%
+  droplevels()
+  
+
+#check if data are normally distributed
+#activemonth is roughly normal
+#ITD is really left skewed
+hist(asbtraits$scAM)
+hist(asbtraits$scITD) #log or sqrt makes a little bit better but not perfect
+
+```
+
+
+now repeat the same calculation for pan trap bumble bee data
+```{r}
+rawbbpan <- read_xlsx("RawData/pan\ traps_bumblebees_2021-05-04.xlsx")
+
+bbpan <- subset(bbpan) %>%# extract just the columns relevant to bumblebee analyses
+  select(site:B.vestalis)%>%
+  mutate(
+    site= factor(site),
+    visit = factor(visit),
+    year = factor(year),
+    monthtxt = month.abb[month],
+    yrmth = paste(year, month, sep="-"), # create a new vector of month-year
+    landuse = factor(landuse),
+    treatment = factor(treatment),
+    field = factor(field),
+    date = as.Date(paste(day, month, year, sep="-"), "%d-%m-%Y"),# concatenate day, month, year to create date
+    # Now calculate days since 1st March. 
+    # The code below is two lines of code condensed:
+    #B$Mar1 = as.Date(paste(01, 03, B$year, sep="-"), "%d-%m-%Y") ,
+    #B$jdate = difftime(B$date ,B$Mar1 , units = c("days")),
+    jdate = difftime(date, as.Date(paste(01, 03, year, sep="-"),"%d-%m-%Y"), units = c("days"))
+    ) %>% 
+  # Filter out WAF 2011 because of management differences (different sown leys), 
+  # and remove the August visit to WAF in 2012 because bumblebees 
+  # weren't sampled on that visit:
+  filter(!(year == '2011' & site == 'waf') & 
+           !(year == '2012' & site == 'waf' & month == 8) ) %>% 
+  # remove columns we don't need:
+  # (start and end times in date-time format, butterfly activity, HYMENOPTERA, extraneous bee columns )
+  select(-c("Hoverflies","HYMENOPTERA","solitary bee","unid solitary bee", "Apidae", "Anthophora","Andrena","Lasioglossum","Megachile","Nomada","Halictus","Hylaeus","Apis mellifera","Bombus"))   %>%
+  # move the new columns to before the species counts
+  relocate(monthtxt:jdate, .before = "ter/luc total") %>% 
+  # get rid of any unused levels, i.e. SEH:
+  droplevels() %>% 
+  # rename Bombus.terr.luc to just terr.luc
+  rename(.,replace = c("ter/luc total" = "terr.luc")) %>% 
+  data.frame()
+```
+
+
+now combine the species trait matrix for all transect, pan trap, bumblebee and solitary bee
+```{r}
+beetraits <- as.data.frame(rbind(BBTtraits, asbtraits)) %>%
+  mutate(scAM = as.numeric(scAM), scITD = as.numeric(scITD))
+```
+
+
+Calculate Gower distance
+```{r}
+#now calculate gower distance
+gower <- gowdis(beetraits[, c("scITD", "Lecty", "scAM","Nesting_construction","Nesting_location","Sociality")])
+round(gower, 3)
+class(gower)
+
+#What is the contribution of each single trait to the multi-trait dissimilarity? 
+#how much each single trait contribute to the final multi-trait dissimilarity?
+#different traits will have different weights but we want them to have a similar weight in our Gower calculation to balance between continuous and categorical traits
+#good to weight it
+weightedGower <- gawdis(beetraits[, c("scITD", "Lecty", "scAM","Nesting_construction","Nesting_location","Sociality")])
+
+#all traits have similar correlation (R=0.48) to the multi-trait dissimilarity), so they have equal contribution
+attr(weightedGower, "correls")
+
+#this is the weight of each traits
+attr(weightedGower, "weights")
+
+#check correlation between traits (can only be done for numeric traits), low correlation
+cor(beetraits[, c("scITD", "scAM")], use = "complete")
+```
+
+## Traits data (bees)
+The traits data needs some work before we can calculate Gower's distances.  
+
+

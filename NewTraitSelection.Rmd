@@ -1,0 +1,264 @@
+---
+title: "Bee functional diversity in AF vs MC"
+author: "Alexa Varah"
+date: "13/05/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is an analysis of bee functional diversity using data from Alexa Varah's PhD, run with `r getRversion()`.
+
+## Load packages  
+
+```{r Load-packages, message=FALSE, warning=FALSE}
+#R.Version() # 4.0.5 (2021-03-31)
+
+rm(list=ls())
+pkgs <- c("readxl", # # for reading in Excel workbooks / spreadsheets
+          "tidyverse", # for data manipulation (includes packages dplyr, tidyr, stringr, ggplot2, purr, tibble, readr, forcats)
+          "chron", # for dealing with dates/times
+          "lme4", # for mixed models
+          "FD", # for functional diversity indices
+          "knitr", # for generating tables
+          "kableExtra", # for generating tables
+          "picante", # for functional diversity indices
+          "SYNCSA") # for functional diversity indices
+
+vapply(pkgs, library, logical(1), character.only = TRUE, logical.return = TRUE,
+       quietly = TRUE)
+```
+## Load and prep data
+
+Exclude WAF 2011 as the monoculture field was a sown clover ley; the agroforestry field was a sown ley with little clover. Bumblebees use clover as a food source.  
+```{r Load-and-prep-data}
+transectdata = read_xlsx("C:/Users/alexv2/OneDrive - Natural History Museum/PhD/data/Transect data_master.xlsx",2)
+#rm(butt)
+B = subset(transectdata, select=site:campestris) %>% # extract just the columns relevant to bumblebee analyses
+  mutate(
+    site = factor(site),
+    site = recode(site, "seh" = "waf"),
+    visit = factor(visit),
+    year = factor(year),
+    date = as.Date(paste(day, month, year, sep="-"), "%d-%m-%Y"), # concatenate day, month, year to create date
+    monthtxt = month.abb[month],
+    yrmth = paste(year, month, sep="-"), # create a new vector of month-year
+    # Now calculate days since 1st March. 
+    # The code below is two lines of code condensed:
+    #B$Mar1 = as.Date(paste(01, 03, B$year, sep="-"), "%d-%m-%Y") 
+    #B$jdate = difftime(B$date ,B$Mar1 , units = c("days"))
+    jdate = difftime(date, as.Date(paste(01, 03, year, sep="-"),"%d-%m-%Y"), units = c("days")), 
+    landuse = factor(landuse),
+    treatment = factor(treatment),
+    field = factor(field),
+    bound.area = as.numeric(bound.area),
+    snh = as.numeric(snh),
+    # remove dates from transect start and end times 
+    #(they were the wrong dates anyway):
+    starttime = times(strftime(start,"%H:%M:%S")), 
+    endtime = times(strftime(end,"%H:%M:%S")), 
+    # get rid of the one value of 4 in windstrength:
+    windfac = factor(wind),
+    wind3 = factor(1+(windfac=="2")+2*(windfac=="3")+2*(windfac=="4")), 
+    ) %>% 
+  # Filter out WAF 2011 because of management differences (very different sown leys):
+  filter(!( (year == '2011' & site == 'waf' ) )) %>% 
+  # move the new columns to before the species counts
+  relocate(date:wind3, .before = HYMENOPTERA) %>% 
+  # remove columns we don't need:
+  # (start and end times in date-time format, butterfly activity, HYMENOPTERA )
+  select(-c(butact,HYMENOPTERA, start, end)) %>%
+  # get rid of any unused levels, i.e. SEH:
+  droplevels() 
+
+#str(butt)
+head(B)
+rm(transectdata)
+```
+Ignore the warning message about NAs: site WAF in 2011 had no values for *snh* and so when *snh* is converted to numeric these NAs cause R to throw a warning. As we've removed all WAF-2011 data the issue is removed. 
+
+##Functional traits used
+Trait diversity is linked with ecosystem service delivery (e.g. [Albrecht et al 2012](https://royalsocietypublishing.org/doi/full/10.1098/rspb.2012.1621)), so we can use bee functional diversity to indicate relative levels of pollination service provision in agroforestry and monoculture farming systems.  
+
+Trait data were obtained from a database of bee species‐level ecological trait data (Stuart Roberts; the compliation of the traits data set was funded by the EU FP7 project ‘Status and Trends of European Pollinators’ (244 090, www.STEP-project.net)). Traits were chosen on the basis of  
+(a) their likelihood of affecting pollination service [Woodcock et al, 2014](https://besjournals.onlinelibrary.wiley.com/doi/full/10.1111/1365-2664.12171) or   
+(b) their influence on bee species' sensitivity to land use (and thus of responding to agroforestry land management) [de Palma 2015](https://besjournals.onlinelibrary.wiley.com/doi/full/10.1111/1365-2664.12524). Traits related to dietary breadth, flight season duration, foraging range, and reproductive and nesting strategies.
+
+&nbsp;
+NB See https://www.colorado.edu/cumuseum/sites/default/files/attached-files/the_bees_of_colorado.pdf: they say that "Cane and Sipes (2006) coined the term mesolectic for bees that restrict pollen collecting to a few plant families (or tribes in the case of larger plant families such as Asteraceae)". For now I've assigned 'mesolecty' to our Polylectic/flexible category.
+
+Justification for nesting location is referenced to [Hass et al, 2018] (https://www.sciencedirect.com/science/article/pii/S0167880917304656?via%3Dihub#sec0085) and [William et al 2010] (https://www.sciencedirect.com/science/article/pii/S0006320710001138). 
+
+According to https://link.springer.com/content/pdf/10.1007/s10531-020-01988-6.pdf, Carder species build their colony in above-ground nests using shredded plant material (e.g. moss and twigs of grass and bushes). Renter species nest in existing cavities either above or below the ground (e.g. abandoned micromammal nests). Inquiline species are Cuckoo bee species (i.e. social parasites species corresponding to the sub-genus Psithyrus) in which queens lay eggs in the nest of other species and do not produce workers (Løken 1984). Their reproductive success therefore depends on that of their host colony.
+
+We have two carder bee species recorded, of which Bombus pascuorum nests have been recorded on ground before (https://onlinelibrary.wiley.com/doi/full/10.1111/1744-7917.12381?saml_referrer) and 	
+Bombus ruderarius as well to our knowledge (http://www.hymettus.org.uk/downloads/B.%20ruderarius%20report08.pdf). Hence, Carder is classified as a "on-ground" nesting location. 
+
+Renter species as "mixed", can be either above or below ground. B. terrestris is known from previous studies to nest subterraneously (https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.420.3381&rep=rep1&type=pdf). Bombus lucorum prefer sheltered boundaries. B. hortorum has significantly more observations were made along those edges that contained tussocks. B. ruderarius is known to nest on the soil surface of the ground. B. pratorum is known to be one of the most opportunistic bumblebee species in terms of where it builds its
+nests. 
+
+Below-ground: B.terr.luc 
+On ground: B.ruderarius
+Above-ground: 
+Unsure: hortorum, pratorum
+
+Social parasite B. rupestris has a host specificity on B. lapidarius  (https://link.springer.com/article/10.1007/s00049-010-0044-4#Sec2). B. lapidarius may nest above ground; this species is known to take advantage of anthropogenic artefacts (Prys-Jones and Corbet, 1991), and sites such as wall cavities may offer ideal unshaded nest sites, but results also show that this species rarely founds nests in above ground vegetation probably due to shading (https://www.sciencedirect.com/science/article/pii/S0006320702001313#BIB63). 
+
+Above-ground: B. rupestris
+```{r Bee-traits-table, echo=FALSE, message=FALSE}
+
+## Set up the info to go into the table
+traits.tbl <- data.frame(
+  
+  Trait = c("Dietary breadth",
+            
+            "Flight period", 
+            
+            "Foraging range", 
+            
+            "Sociality",
+            
+            "Nesting location",
+            
+            "Nesting construction")
+  
+  ,`Trait values/ categories` = c(
+    "No lecty status<br>
+    <br>
+    Obligately oligolectic<br>
+    <br>
+    <br>
+    Polylectic/flexible",
+    
+    "Temporal range of pollinating activity, number of months",
+    
+    "Body size, measured as Inter Tegular Distance (ITD)", 
+    
+    "Obligately solitary<br>
+    <br>
+    <br>
+    Not obligately solitary",
+    
+    "Above-ground<br>
+    <br>
+    <br>
+    <br>
+    <br>
+    <br>
+    <br>
+    <br>
+    Below-ground",
+    
+    "Excavators<br>
+    <br>
+    <br>
+    <br>
+    Non-excavators"
+      
+  )
+ 
+ ,`Original categories (and source)` = c(
+    "No Lectic status<br>
+    <br>
+    Monolectic<br>
+    Narrowly oligolectic<br>
+    Oligolectic<br>
+    <br>
+    Mesolectic<br>
+    Polylectic<br>
+    Broadly polylectic<br>
+    <br>
+    (Cane 2020)",
+    
+    "..",
+    
+    "..", 
+    
+    "Solitary<br>
+    Communal<br>
+    Cleptoparasitic<br>
+    <br>
+    Social parasite<br>
+    Primitively eusocial<br>
+    Highly eusocial<br>
+    Solitary+primitively eusocial<br>
+    Polymorphic",
+    
+    "Excavator: Dead stems<br>
+    Excavator: Dead wood<br>
+    Cleptoparasite<br>
+    Renter: Snail shells<br>
+    Social parasite<br>
+    Renter: Existing cavities<br>
+    Carder<br>
+    <br>
+    Mason<br>
+    Excavator: Ground<br>
+    Renter: Existing cavities and Excavator, ground",
+    
+    "Excavator: Ground<br>
+    Excavator: Dead stems<br>
+    Excavator: Dead wood<br>
+    <br>
+    Mason<br>
+    Cleptoparasite<br>
+    Renter: Snail shells<br>
+    Renter: Existing cavities and Excavator, ground<br>
+    Social parasite<br>
+    Renter: Existing cavities<br>
+    Carder"
+  ) 
+  
+  ,`Rationale and details` = c(
+    "The range of plants foraged upon will affect<br> 
+    (a) the likelihood of agroforestry benefiting the species, and<br>
+    (b) the likelihood of congruence of bee foraging with crop pollination needs.<br>
+    Species with no lecty status are those which do not collect their own pollen, e.g. cleptoparasites. The 'Polylectic/flexible' level comprised 'polylectic' and 'oligolectic or polylectic' categories from the original traits database. ",
+    
+    "Influences the likelihood of congruence between bee activity and crop flowering (of both woody and non-woody crops).<br> Influences the degree to which a species is impacted by agricultural management: species with shorter flight periods are more likely to be univoltine and thus potentially more vulnerable to disturbances coinciding with time of reproduction (Brittain & Potts 2011).", 
+    
+    "ITD can be used a proxy for foraging distance (Greenleaf et al, 2015). It affects a species' ability to use resources across agricultural landscapes.", 
+    
+    "Social species are more sensitive to pesticides, so agroforestry may benefit them (and thus pollination) through increased provision of refugia from pesticides (the agroforestry tree rows & their understorys). Obligately solitary comprised the categories 'solitary', 'solitary or communal', 'cleptoparasitic'. Not obligately solitary comprised 'highly eusocial', 'primitively eusocial', 'solitary/primitively eusocial', 'polymorphic', 'social parasites'.",
+    
+    "Above-ground nesting species are assumed to depend on habitat structures such as trees, twigs or dead wood provided by agro-forests and therefore land use type and isolation might be importantdrivers for nesting traits (Forrest et al., 2015; Michener, 2007). This trait affects bee's sensitivity to habitat loss, agricultural intensification, tillage regime (within agriculture) and fire (William et al, 2010). Based on William et al (2010) (but very little species overlap), above-ground are nests that depend on substantial woody material such as branches and logs, and below-ground are those that could nest in more ephemeral types of vegetation, like grass and forb stems.",
+    
+    "Excavator species build their own nests and non-excavators nest in existing holes or cavities. The farming system in a field may affect the landscape structure and hence the availability of suitable nesting locations. This trait is used in William et al 2010, which has both nesting construction and nesting location as their nest traits."
+  )
+)
+
+## Now create the actual table
+kable(traits.tbl,
+      
+      # Set column headers 
+      # (N.B. these have to match the vector names you've specified above)
+      col.names = c("Trait",
+                    "Trait values/ categories",
+                    "Original categories (and source)",
+                    "Rationale and details"
+                    )
+      
+      # The following line forces the font to be black (kable_styling default is white font).
+      # You don't need this line if you use kable_paper or other kable options such as _material, _minimal, _classic, _paper etc.
+      # Adding 'escape = FALSE' allows line breaks within cells; otherwise, the '<br>' in the above text is just printed as text.
+      , format = "html", escape = FALSE, table.attr = "style = \"color: black;\""
+      ) %>%  
+  column_spec(column = 3, width = "2in") %>%
+  
+  # Specify how you want the table to to look
+  #kable_paper("striped", full_width = F, html_font = "Calibri")
+  kable_styling(bootstrap_options = c("striped" 
+                                      ,"hover"
+                                      ,"responsive" 
+                                      ,"condensed" 
+                                      , html_font = "Calibri" 
+                                      #, full_width = FALSE 
+                                      #, position = "left"
+                                      ) 
+                )
+
+
+```
+
